@@ -41,4 +41,3 @@ When an actor fails, failure handling goes through the following steps:
   * Restart: Similar to *Resume*, but initialize each actor's behavior from a restart lifecycle method.
   * Escalate: Suspend the supervisor (and its children, but not the escalating actor), and ask its
         supervisor for its decision
-      

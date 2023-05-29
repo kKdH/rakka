@@ -7,7 +7,7 @@ edition = "2021"
 ctor = "0.2"
 
 [dependencies]
-colored = "2"
+anyhow = "1.0"
 
 actix = "0.13"
 acto = { version="0.2", features=["tokio"]}
