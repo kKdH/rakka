@@ -290,10 +290,10 @@ mod test {
 // ActorRef -> Future
 // supervision
 // stop() method on context to stop child actors
-// props
 // shutdown
 // support for Span across message sends (?)
 // stash / unstash
+// become
 // ReceiveTimeout
 // aroundReceive
 // DeathPact
