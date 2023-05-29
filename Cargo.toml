@@ -1,0 +1,19 @@
+[package]
+name = "rakka"
+version = "0.1.0"
+edition = "2021"
+
+[dev-dependencies]
+ctor = "0.2"
+
+[dependencies]
+colored = "2"
+
+actix = "0.13"
+acto = { version="0.2", features=["tokio"]}
+
+tokio = { version="1.28", features=["full"]}
+
+tracing = "0.1"
+tracing-subscriber = "0.3"
+triomphe = "0"
