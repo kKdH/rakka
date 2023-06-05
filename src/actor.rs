@@ -1,15 +1,17 @@
 use std::fmt::{Debug, Formatter};
 use std::future::Future;
+use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
-use tracing::{debug, instrument, trace};
+use rustc_hash::FxHashSet;
+use tracing::{instrument, trace};
 
 use triomphe::Arc;
 use crate::behavior::Behavior;
 use crate::mailbox::Mailbox;
 
-#[derive(Debug, Copy, Clone)]
-struct ActorId(u64);
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub struct ActorId(u64);
 impl ActorId {
     fn new() -> ActorId {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -68,19 +70,52 @@ pub trait SignalSender: Debug + Send {
     fn clone_to_box(&self) -> Box<dyn SignalSender>; //TODO move to separate trait to reduce visibility
 }
 
+#[derive(Debug)]
+pub struct GenericActorRef(Box<dyn SignalSender>);
+impl GenericActorRef {
+    fn signal(&self, signal: Signal) -> bool {
+        self.0.signal(signal)
+    }
+    fn stop(&self) -> bool {
+        self.0.stop()
+    }
+}
+impl <M: Send + 'static> From<ActorRef<M>> for GenericActorRef {
+    fn from(value: ActorRef<M>) -> Self {
+        GenericActorRef(Box::new(value))
+    }
+}
+
+impl Clone for GenericActorRef {
+    fn clone(&self) -> Self {
+        GenericActorRef(self.0.clone_to_box())
+    }
+}
+impl Eq for GenericActorRef {}
+impl PartialEq for GenericActorRef {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.id() == other.0.id()
+    }
+}
+impl Hash for GenericActorRef {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.id().hash(state)
+    }
+}
+
 struct ActorRefInner<M> {
     id: ActorId,
     message_sender: tokio::sync::mpsc::Sender<Envelope<M>>,
     system_sender: tokio::sync::mpsc::Sender<Signal>,
 }
 
+
 struct ActorCell<M: Send + 'static> {
-    myself: ActorRef<M>,
     ctx: ActorContext<M>,
     mailbox: Mailbox<M>,
+
     behavior: Box<dyn Behavior<M> + Send>, //TODO is there a static representation?
-    // This data structure is optimized for the (common) case that an actor has no death watchers
-    death_watchers: Option<Box<Vec<Box<dyn SignalSender>>>>,
+    death_watchers: FxHashSet<GenericActorRef>,
 }
 impl <M: Send + Debug + 'static> ActorCell<M> {
     #[instrument]
@@ -91,20 +126,16 @@ impl <M: Send + Debug + 'static> ActorCell<M> {
             match &envelope {
                 Envelope::Signal(Signal::Terminate) => {
                     trace!("terminating actor");
-                    if let Some(death_watchers) = &self.death_watchers {
-                        trace!("notifying {} death watchers", death_watchers.len());
-                        for dw in death_watchers.iter() {
-                            dw.signal(Signal::Death(self.myself.id()));
+                    if self.death_watchers.len() > 0 {
+                        trace!("notifying {} death watchers", self.death_watchers.len());
+                        for dw in &self.death_watchers {
+                            dw.signal(Signal::Death(self.ctx.myself.id()));
                         }
                     }
                     break;
                 }
                 Envelope::Signal(Signal::Watch { subscriber }) => {
-                    let subscriber: Box<dyn SignalSender> = subscriber.clone_to_box();
-                    match &mut self.death_watchers {
-                        None => self.death_watchers = Some(Box::new(vec![subscriber])),
-                        Some(deatch_watchers) => deatch_watchers.push(subscriber),
-                    }
+                    self.death_watchers.insert(subscriber.clone());
                 }
                 _ => {}
             }
@@ -119,7 +150,7 @@ impl <M: Send + Debug + 'static> ActorCell<M> {
 }
 impl <M: Send + 'static> Debug for ActorCell<M> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "ActorCell({})", self.myself.0.id.0)
+        write!(f, "ActorCell({})", self.ctx.myself.0.id.0)
     }
 }
 
@@ -137,7 +168,7 @@ trait SupervisionStrategy {
 #[derive(Debug)]
 pub enum Signal {
     Death(ActorId),
-    Watch { subscriber: Box<dyn SignalSender> },
+    Watch { subscriber: GenericActorRef },
     //TODO unwatch?
     //TODO PostStop
     Terminate
@@ -157,7 +188,7 @@ pub enum Envelope<M> {
 struct ActorRuntime {
     tokio_handle: tokio::runtime::Handle,
 }
-fn spawn_actor<M: 'static + Debug + Send>(actor_runtime: &Arc<ActorRuntime>, behavior: impl Behavior<M> + 'static + Send) -> ActorRef<M> {
+fn spawn_actor<M: 'static + Debug + Send>(actor_runtime: &Arc<ActorRuntime>, behavior: impl Behavior<M> + 'static + Send, parent: Option<Box<dyn SignalSender>>) -> ActorRef<M> {
     let id = ActorId::new();
     trace!("spawning new actor {:?}", id); //TODO Debug for Behavior -> impl Into<Behavior<M>>
     let (message_sender, system_sender, mailbox) = Mailbox::new(128); //TODO mailbox size
@@ -169,14 +200,15 @@ fn spawn_actor<M: 'static + Debug + Send>(actor_runtime: &Arc<ActorRuntime>, beh
     }));
 
     let actor_cell = ActorCell {
-        myself: actor_ref.clone(),
         mailbox,
         ctx: ActorContext {
             myself: actor_ref.clone(),
+            parent,
+            children: Default::default(),
             inner: actor_runtime.clone(),
         },
         behavior: Box::new(behavior),
-        death_watchers: None,
+        death_watchers: Default::default(),
     };
 
     actor_runtime.tokio_handle.spawn(actor_cell.message_loop());
@@ -185,14 +217,17 @@ fn spawn_actor<M: 'static + Debug + Send>(actor_runtime: &Arc<ActorRuntime>, beh
 }
 
 
-#[derive(Clone)]
 pub struct ActorContext<M: Send + 'static> {
     myself: ActorRef<M>,
+    parent: Option<Box<dyn SignalSender>>,
+    children: FxHashSet<GenericActorRef>,
     inner: Arc<ActorRuntime>,
 }
 impl <M: Send + 'static> ActorContext<M> {
     fn spawn<N: 'static + Debug + Send>(&mut self, behavior: impl Behavior<N> + 'static + Send) -> ActorRef<N> {
-        spawn_actor(&self.inner, behavior)
+        let result = spawn_actor(&self.inner, behavior, Some(Box::new(self.myself.clone())));
+        self.children.insert(result.clone().into());
+        result
     }
 }
 
@@ -217,7 +252,7 @@ impl ActorSystem {
     }
 
     fn spawn<M: 'static + Debug + Send>(&mut self, behavior: impl Behavior<M> + 'static + Send) -> ActorRef<M> { //TODO single top-level actor?
-        spawn_actor(&self.inner, behavior)
+        spawn_actor(&self.inner, behavior, None) //TODO synthetic root actor per ActorSystem
     }
 }
 
@@ -255,7 +290,7 @@ mod test {
         let actor_ref = actor_system.spawn(dumping_behavior);
 
         let dw_ref = actor_system.spawn(dw_behavior);
-        actor_ref.signal(Signal::Watch { subscriber: Box::new(dw_ref) });
+        actor_ref.signal(Signal::Watch { subscriber: dw_ref.into() });
 
         actor_ref.send("yo1".to_string());
         actor_ref.send("yo2".to_string());
