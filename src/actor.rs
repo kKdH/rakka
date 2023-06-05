@@ -5,6 +5,7 @@ use std::time::Duration;
 use tracing::{debug, instrument, trace};
 
 use triomphe::Arc;
+use crate::behavior::Behavior;
 use crate::mailbox::Mailbox;
 
 #[derive(Debug, Copy, Clone)]
@@ -108,7 +109,10 @@ impl <M: Send + Debug + 'static> ActorCell<M> {
                 _ => {}
             }
 
-            self.behavior.receive(&self.ctx, envelope);
+            //TODO handle panic!()
+            if let Err(err) = self.behavior.receive(&mut self.ctx, envelope) {
+                todo!()
+            }
         }
         trace!("exiting message loop");
     }
@@ -150,28 +154,6 @@ pub enum Envelope<M> {
     Signal(Signal),
 }
 
-
-trait Behavior<M: Send + 'static> {
-    fn receive(&mut self, ctx: &ActorContext<M>, envelope: Envelope<M>); //NB: *not* async
-}
-
-//TODO variations - msg / envelope, with / without ctx, ...
-impl <F, M> Behavior<M> for F
-    where F: FnMut(&ActorContext<M>, M),
-          M: Send + 'static,
-{
-    fn receive(&mut self, ctx: &ActorContext<M>, envelope: Envelope<M>) {
-        match envelope {
-            Envelope::Message(msg) => {
-                self(ctx, msg)
-            },
-            Envelope::Signal(sig) => {
-                trace!("ignoring signal {:?} in behavior", sig)
-            }
-        }
-    }
-}
-
 struct ActorRuntime {
     tokio_handle: tokio::runtime::Handle,
 }
@@ -204,7 +186,7 @@ fn spawn_actor<M: 'static + Debug + Send>(actor_runtime: &Arc<ActorRuntime>, beh
 
 
 #[derive(Clone)]
-struct ActorContext<M: Send + 'static> {
+pub struct ActorContext<M: Send + 'static> {
     myself: ActorRef<M>,
     inner: Arc<ActorRuntime>,
 }
@@ -263,11 +245,11 @@ mod test {
 
     #[tokio::test]
     async fn test_simple() {
-        fn dumping_behavior(_ctx: &ActorContext<String>, s: String) {
+        fn dumping_behavior(_ctx: &mut ActorContext<String>, s: String) {
             info!("{}", s);
         }
 
-        fn dw_behavior(ctx: &ActorContext<()>, msg: ()) {}
+        fn dw_behavior(ctx: &mut ActorContext<()>, msg: ()) {}
 
         let (mut actor_system, shutdown_handle) = ActorSystem::new();
         let actor_ref = actor_system.spawn(dumping_behavior);
@@ -297,3 +279,4 @@ mod test {
 // ReceiveTimeout
 // aroundReceive
 // DeathPact
+// monitoring - mailbox size, delay, throughput, ...
