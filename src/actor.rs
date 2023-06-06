@@ -4,7 +4,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use rustc_hash::FxHashSet;
-use tracing::{instrument, trace};
+use tracing::{debug, instrument, trace, warn};
 
 use triomphe::Arc;
 use crate::behavior::Behavior;
@@ -113,6 +113,8 @@ struct ActorRefInner<M> {
 struct ActorCell<M: Send + 'static> {
     ctx: ActorContext<M>,
     mailbox: Mailbox<M>,
+    is_terminating: bool,
+    suspend_count: u32,
 
     behavior: Box<dyn Behavior<M> + Send>, //TODO is there a static representation?
     death_watchers: FxHashSet<GenericActorRef>,
@@ -121,24 +123,55 @@ impl <M: Send + Debug + 'static> ActorCell<M> {
     #[instrument]
     async fn message_loop(mut self) {
         trace!("starting message loop");
-        while let Some(envelope) = self.mailbox.next().await {
+        while let Some(envelope) = self.mailbox.next(self.suspend_count > 0).await {
             trace!("received {:?}", envelope);
             match &envelope {
-                Envelope::Signal(Signal::Terminate) => {
-                    trace!("terminating actor");
-                    if self.death_watchers.len() > 0 {
-                        trace!("notifying {} death watchers", self.death_watchers.len());
-                        for dw in &self.death_watchers {
-                            dw.signal(Signal::Death(self.ctx.myself.id()));
-                        }
+                Envelope::Signal(Signal::ChildTerminated(child_ref)) => {
+                    trace!("child {:?} terminated", child_ref);
+                    if !self.ctx.children.remove(child_ref) {
+                        debug!("terminated 'child' was not registered as a child");
                     }
-                    break;
+                }
+                Envelope::Signal(Signal::Suspend) => {
+                    trace!("suspending actor");
+                    if self.suspend_count == u32::MAX {
+                        warn!("max number of nested suspends exceeded"); //TODO
+                    }
+                    self.suspend_count += 1;
+                    for child in &self.ctx.children {
+                        child.signal(Signal::Suspend);
+                    }
+                }
+                Envelope::Signal(Signal::Terminate) => {
+                    trace!("start terminating actor");
+                    self.is_terminating = true;
+
+                    for child in &self.ctx.children {
+                        child.signal(Signal::Terminate);
+                    }
                 }
                 Envelope::Signal(Signal::Watch { subscriber }) => {
                     self.death_watchers.insert(subscriber.clone());
                 }
                 _ => {}
             }
+
+            if self.is_terminating && self.ctx.children.is_empty() {
+                trace!("actually terminating actor");
+
+                if let Some(parent) = self.ctx.parent {
+                    parent.signal(Signal::ChildTerminated(self.ctx.myself.clone().into()));
+                }
+
+                if self.death_watchers.len() > 0 {
+                    trace!("notifying {} death watchers", self.death_watchers.len());
+                    for dw in &self.death_watchers {
+                        dw.signal(Signal::Death(self.ctx.myself.id()));
+                    }
+                }
+                break;
+            }
+
 
             //TODO handle panic!()
             if let Err(err) = self.behavior.receive(&mut self.ctx, envelope) {
@@ -155,7 +188,6 @@ impl <M: Send + 'static> Debug for ActorCell<M> {
 }
 
 enum SupervisorDecision {
-    Resume,
     Restart,
     Stop,
     Escalate,
@@ -167,11 +199,14 @@ trait SupervisionStrategy {
 
 #[derive(Debug)]
 pub enum Signal {
+    ChildTerminated(GenericActorRef),
     Death(ActorId),
     Watch { subscriber: GenericActorRef },
     //TODO unwatch?
     //TODO PostStop
-    Terminate
+    Suspend,
+    Terminate,
+    Restart,
 }
 impl <M> Into<Envelope<M>> for Signal {
     fn into(self) -> Envelope<M> {
@@ -188,7 +223,7 @@ pub enum Envelope<M> {
 struct ActorRuntime {
     tokio_handle: tokio::runtime::Handle,
 }
-fn spawn_actor<M: 'static + Debug + Send>(actor_runtime: &Arc<ActorRuntime>, behavior: impl Behavior<M> + 'static + Send, parent: Option<Box<dyn SignalSender>>) -> ActorRef<M> {
+fn spawn_actor<M: 'static + Debug + Send>(actor_runtime: &Arc<ActorRuntime>, behavior: impl Behavior<M> + 'static + Send, parent: Option<GenericActorRef>) -> ActorRef<M> {
     let id = ActorId::new();
     trace!("spawning new actor {:?}", id); //TODO Debug for Behavior -> impl Into<Behavior<M>>
     let (message_sender, system_sender, mailbox) = Mailbox::new(128); //TODO mailbox size
@@ -207,6 +242,8 @@ fn spawn_actor<M: 'static + Debug + Send>(actor_runtime: &Arc<ActorRuntime>, beh
             children: Default::default(),
             inner: actor_runtime.clone(),
         },
+        is_terminating: false,
+        suspend_count: 0,
         behavior: Box::new(behavior),
         death_watchers: Default::default(),
     };
@@ -219,13 +256,13 @@ fn spawn_actor<M: 'static + Debug + Send>(actor_runtime: &Arc<ActorRuntime>, beh
 
 pub struct ActorContext<M: Send + 'static> {
     myself: ActorRef<M>,
-    parent: Option<Box<dyn SignalSender>>,
+    parent: Option<GenericActorRef>,
     children: FxHashSet<GenericActorRef>,
     inner: Arc<ActorRuntime>,
 }
 impl <M: Send + 'static> ActorContext<M> {
     fn spawn<N: 'static + Debug + Send>(&mut self, behavior: impl Behavior<N> + 'static + Send) -> ActorRef<N> {
-        let result = spawn_actor(&self.inner, behavior, Some(Box::new(self.myself.clone())));
+        let result = spawn_actor(&self.inner, behavior, Some(self.myself.clone().into()));
         self.children.insert(result.clone().into());
         result
     }
