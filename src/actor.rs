@@ -4,7 +4,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use rustc_hash::FxHashSet;
-use tracing::{debug, instrument, trace, warn};
+use tracing::{debug, error, instrument, trace, warn};
 
 use triomphe::Arc;
 use crate::behavior::Behavior;
@@ -23,14 +23,18 @@ impl ActorId {
     }
 }
 
-struct ActorRef<M: Send>(Arc<ActorRefInner<M>>);
-impl <M: Send> ActorRef<M> {
+struct ActorRef<M: Send + 'static>(Arc<ActorRefInner<M>>);
+impl <M: Send + 'static> ActorRef<M> {
     fn send(&self, msg: M) -> bool {
         self.send_envelope(Envelope::Message(msg))
     }
 
     fn send_envelope(&self, envelope: Envelope<M>) -> bool {
         self.0.message_sender.try_send(envelope).is_ok()
+    }
+
+    fn as_generic(&self) -> GenericActorRef {
+        GenericActorRef(Box::new(self.clone()))
     }
 }
 impl <M: Send + 'static> SignalSender for ActorRef<M> {
@@ -50,12 +54,12 @@ impl <M: Send + 'static> SignalSender for ActorRef<M> {
         Box::new(self.clone())
     }
 }
-impl <M: Send> Clone for ActorRef<M> {
+impl <M: Send + 'static> Clone for ActorRef<M> {
     fn clone(&self) -> Self {
         ActorRef(self.0.clone())
     }
 }
-impl <M: Send> Debug for ActorRef<M> {
+impl <M: Send + 'static> Debug for ActorRef<M> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "ActorRef({})", self.0.id.0)
     }
@@ -78,11 +82,6 @@ impl GenericActorRef {
     }
     fn stop(&self) -> bool {
         self.0.stop()
-    }
-}
-impl <M: Send + 'static> From<ActorRef<M>> for GenericActorRef {
-    fn from(value: ActorRef<M>) -> Self {
-        GenericActorRef(Box::new(value))
     }
 }
 
@@ -117,6 +116,7 @@ struct ActorCell<M: Send + 'static> {
     suspend_count: u32,
 
     behavior: Box<dyn Behavior<M> + Send>, //TODO is there a static representation?
+    supervision_strategy: Box<dyn SupervisionStrategy>,
     death_watchers: FxHashSet<GenericActorRef>,
 }
 impl <M: Send + Debug + 'static> ActorCell<M> {
@@ -126,30 +126,9 @@ impl <M: Send + Debug + 'static> ActorCell<M> {
         while let Some(envelope) = self.mailbox.next(self.suspend_count > 0).await {
             trace!("received {:?}", envelope);
             match &envelope {
-                Envelope::Signal(Signal::ChildTerminated(child_ref)) => {
-                    trace!("child {:?} terminated", child_ref);
-                    if !self.ctx.children.remove(child_ref) {
-                        debug!("terminated 'child' was not registered as a child");
-                    }
-                }
-                Envelope::Signal(Signal::Suspend) => {
-                    trace!("suspending actor");
-                    if self.suspend_count == u32::MAX {
-                        warn!("max number of nested suspends exceeded"); //TODO
-                    }
-                    self.suspend_count += 1;
-                    for child in &self.ctx.children {
-                        child.signal(Signal::Suspend);
-                    }
-                }
-                Envelope::Signal(Signal::Terminate) => {
-                    trace!("start terminating actor");
-                    self.is_terminating = true;
-
-                    for child in &self.ctx.children {
-                        child.signal(Signal::Terminate);
-                    }
-                }
+                Envelope::Signal(Signal::ChildTerminated(child_ref)) => self.handle_child_terminated(child_ref),
+                Envelope::Signal(Signal::Suspend) => self.handle_suspend(),
+                Envelope::Signal(Signal::Terminate) => self.handle_terminate(),
                 Envelope::Signal(Signal::Watch { subscriber }) => {
                     self.death_watchers.insert(subscriber.clone());
                 }
@@ -160,7 +139,7 @@ impl <M: Send + Debug + 'static> ActorCell<M> {
                 trace!("actually terminating actor");
 
                 if let Some(parent) = self.ctx.parent {
-                    parent.signal(Signal::ChildTerminated(self.ctx.myself.clone().into()));
+                    parent.signal(Signal::ChildTerminated(self.ctx.myself.as_generic()));
                 }
 
                 if self.death_watchers.len() > 0 {
@@ -175,10 +154,85 @@ impl <M: Send + Debug + 'static> ActorCell<M> {
 
             //TODO handle panic!()
             if let Err(err) = self.behavior.receive(&mut self.ctx, envelope) {
-                todo!()
+                debug!("actor crashed returning an error: {}", err);
+
+                // this actor crashed - suspend it and ask supervisor
+                self.ctx.myself.signal(Signal::Suspend);
+
+                if let Some(supervisor) = &self.ctx.parent {
+                    supervisor.signal(Signal::SupervisionRequired(self.ctx.myself.as_generic()));
+                }
+                else {
+                    todo!()
+                }
             }
         }
         trace!("exiting message loop");
+    }
+
+    fn handle_child_terminated(&mut self, child_ref: &GenericActorRef) {
+        trace!("child {:?} terminated", child_ref);
+        if !self.ctx.children.remove(child_ref) {
+            debug!("terminated 'child' was not registered as a child");
+        }
+    }
+
+    fn handle_suspend(&mut self) {
+        trace!("suspending actor");
+        if self.suspend_count == u32::MAX {
+            warn!("max number of nested suspends exceeded"); //TODO
+        }
+        self.suspend_count += 1;
+        for child in &self.ctx.children {
+            child.signal(Signal::Suspend);
+        }
+    }
+
+    fn handle_terminate(&mut self) {
+        trace!("start terminating actor");
+        self.is_terminating = true;
+
+        for child in &self.ctx.children {
+            child.signal(Signal::Terminate);
+        }
+    }
+
+    //TODO lifecycle callbacks
+
+    fn handle_restart(&mut self) {
+        if self.is_terminating {
+            trace!("skipping actor restart because it is already terminating");
+        }
+        else {
+            trace!("restarting actor");
+            if self.suspend_count == 0 {
+                error!("inconsistent internal actor state - restarting though not suspended"); //TODO
+            }
+            self.suspend_count -= 1;
+            //TODO replace behavior with new behavior
+        }
+    }
+
+    fn handle_supervision_required(&mut self, crashed_actor: GenericActorRef) {
+        //TODO pass crash details, crashed actor, position (message handling, callback, ...)
+        match self.supervision_strategy.decide_on_failure() {
+            SupervisorDecision::Restart => { crashed_actor.signal(Signal::Restart); }, //TODO handle 'signal()' return value
+            SupervisorDecision::Stop => { crashed_actor.signal(Signal::Terminate); },
+            SupervisorDecision::Escalate => {
+                self.suspend_count += 1;
+                for child in &self.ctx.children {
+                    if child != &crashed_actor {
+                        child.signal(Signal::Suspend);
+                    }
+                }
+                if let Some(supervisor) = &self.ctx.parent {
+                    supervisor.signal(Signal::SupervisionRequired(self.ctx.myself.as_generic()));
+                }
+                else {
+                    todo!();
+                }
+            }
+        }
     }
 }
 impl <M: Send + 'static> Debug for ActorCell<M> {
@@ -192,8 +246,21 @@ enum SupervisorDecision {
     Stop,
     Escalate,
 }
-trait SupervisionStrategy {
+trait SupervisionStrategy: Send {
     fn decide_on_failure(&self) -> SupervisorDecision;
+}
+
+struct StoppingSupervisionStrategy {}
+impl SupervisionStrategy for StoppingSupervisionStrategy {
+    fn decide_on_failure(&self) -> SupervisorDecision {
+        SupervisorDecision::Stop
+    }
+}
+struct RestartingSupervisionStrategy {}
+impl SupervisionStrategy for RestartingSupervisionStrategy {
+    fn decide_on_failure(&self) -> SupervisorDecision {
+        SupervisorDecision::Restart
+    }
 }
 
 
@@ -207,6 +274,8 @@ pub enum Signal {
     Suspend,
     Terminate,
     Restart,
+
+    SupervisionRequired(GenericActorRef),
 }
 impl <M> Into<Envelope<M>> for Signal {
     fn into(self) -> Envelope<M> {
@@ -245,6 +314,7 @@ fn spawn_actor<M: 'static + Debug + Send>(actor_runtime: &Arc<ActorRuntime>, beh
         is_terminating: false,
         suspend_count: 0,
         behavior: Box::new(behavior),
+        supervision_strategy: Box::new(StoppingSupervisionStrategy{}),
         death_watchers: Default::default(),
     };
 
@@ -262,8 +332,8 @@ pub struct ActorContext<M: Send + 'static> {
 }
 impl <M: Send + 'static> ActorContext<M> {
     fn spawn<N: 'static + Debug + Send>(&mut self, behavior: impl Behavior<N> + 'static + Send) -> ActorRef<N> {
-        let result = spawn_actor(&self.inner, behavior, Some(self.myself.clone().into()));
-        self.children.insert(result.clone().into());
+        let result = spawn_actor(&self.inner, behavior, Some(self.myself.as_generic()));
+        self.children.insert(result.as_generic());
         result
     }
 }
@@ -327,7 +397,7 @@ mod test {
         let actor_ref = actor_system.spawn(dumping_behavior);
 
         let dw_ref = actor_system.spawn(dw_behavior);
-        actor_ref.signal(Signal::Watch { subscriber: dw_ref.into() });
+        actor_ref.signal(Signal::Watch { subscriber: dw_ref.as_generic() });
 
         actor_ref.send("yo1".to_string());
         actor_ref.send("yo2".to_string());
