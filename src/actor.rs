@@ -110,18 +110,17 @@ struct ActorRefInner<M> {
     system_sender: tokio::sync::mpsc::Sender<Signal>,
 }
 
-
-struct ActorCell<M: Send + 'static> {
+struct ActorCell<M: Send + 'static, S: SupervisionStrategy> {
     ctx: ActorContext<M>,
     mailbox: Mailbox<M>,
     is_terminating: bool,
     suspend_count: u32,
 
     behavior: Box<dyn Behavior<M> + Send>, //TODO is there a static representation?
-    supervision_strategy: Box<dyn SupervisionStrategy>,
+    supervision_strategy: S,
     death_watchers: FxHashSet<GenericActorRef>,
 }
-impl <M: Send + Debug + 'static> ActorCell<M> {
+impl <M: Send + Debug + 'static, S: SupervisionStrategy> ActorCell<M, S> {
     #[instrument]
     async fn message_loop(mut self) {
         trace!("starting message loop");
@@ -249,7 +248,7 @@ impl <M: Send + Debug + 'static> ActorCell<M> {
         }
     }
 }
-impl <M: Send + 'static> Debug for ActorCell<M> {
+impl <M: Send + 'static, S: SupervisionStrategy> Debug for ActorCell<M, S> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "ActorCell({})", self.ctx.myself.0.id.0)
     }
@@ -339,7 +338,7 @@ fn spawn_actor<M: 'static + Debug + Send>(actor_runtime: &Arc<ActorRuntime>, beh
         is_terminating: false,
         suspend_count: 0,
         behavior: Box::new(behavior),
-        supervision_strategy: Box::new(StoppingSupervisionStrategy{}),
+        supervision_strategy: StoppingSupervisionStrategy{},
         death_watchers: Default::default(),
     };
 
