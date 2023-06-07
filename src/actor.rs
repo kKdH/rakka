@@ -1,6 +1,8 @@
+use std::any::Any;
 use std::fmt::{Debug, Formatter};
 use std::future::Future;
 use std::hash::{Hash, Hasher};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use rustc_hash::FxHashSet;
@@ -151,20 +153,33 @@ impl <M: Send + Debug + 'static> ActorCell<M> {
                 break;
             }
 
-
             //TODO handle panic!()
-            if let Err(err) = self.behavior.receive(&mut self.ctx, envelope) {
-                debug!("actor crashed returning an error: {}", err);
 
-                // this actor crashed - suspend it and ask supervisor
-                self.ctx.myself.signal(Signal::Suspend);
+            let received = catch_unwind(AssertUnwindSafe(|| self.behavior.receive(&mut self.ctx, envelope)));
+            let cause = match received {
+                Err(e) => {
+                    // panicked -> actor crashed
+                    debug!("actor crashed by panicking");
+                    CrashCause::Panic(e)
+                }
+                Ok(Err(e)) => {
+                    // returned Err -> actor crashed
+                    debug!("actor crashed returning an error: {}", e);
+                    CrashCause::Err(e)
+                }
+                Ok(_) => {
+                    continue;
+                }
+            };
 
-                if let Some(supervisor) = &self.ctx.parent {
-                    supervisor.signal(Signal::SupervisionRequired(self.ctx.myself.as_generic()));
-                }
-                else {
-                    todo!()
-                }
+            // this actor crashed - suspend it and ask supervisor
+            self.ctx.myself.signal(Signal::Suspend);
+
+            if let Some(supervisor) = &self.ctx.parent {
+                supervisor.signal(Signal::SupervisionRequired(self.ctx.myself.as_generic(), cause, CrashLifecycleStage::ReceiveLoop));
+            }
+            else {
+                todo!()
             }
         }
         trace!("exiting message loop");
@@ -213,9 +228,8 @@ impl <M: Send + Debug + 'static> ActorCell<M> {
         }
     }
 
-    fn handle_supervision_required(&mut self, crashed_actor: GenericActorRef) {
-        //TODO pass crash details, crashed actor, position (message handling, callback, ...)
-        match self.supervision_strategy.decide_on_failure() {
+    fn handle_supervision_required(&mut self, crashed_actor: GenericActorRef, cause: CrashCause, lifecycle_stage: CrashLifecycleStage) {
+        match self.supervision_strategy.decide_on_failure(&cause, &lifecycle_stage) {
             SupervisorDecision::Restart => { crashed_actor.signal(Signal::Restart); }, //TODO handle 'signal()' return value
             SupervisorDecision::Stop => { crashed_actor.signal(Signal::Terminate); },
             SupervisorDecision::Escalate => {
@@ -226,7 +240,7 @@ impl <M: Send + Debug + 'static> ActorCell<M> {
                     }
                 }
                 if let Some(supervisor) = &self.ctx.parent {
-                    supervisor.signal(Signal::SupervisionRequired(self.ctx.myself.as_generic()));
+                    supervisor.signal(Signal::SupervisionRequired(self.ctx.myself.as_generic(), cause, lifecycle_stage));
                 }
                 else {
                     todo!();
@@ -241,24 +255,35 @@ impl <M: Send + 'static> Debug for ActorCell<M> {
     }
 }
 
+#[derive(Debug)]
+enum CrashCause {
+    Panic(Box<dyn Any+Send>),
+    Err(anyhow::Error),
+}
+
+#[derive(Debug)]
+enum CrashLifecycleStage {
+    ReceiveLoop,
+}
+
 enum SupervisorDecision {
     Restart,
     Stop,
     Escalate,
 }
 trait SupervisionStrategy: Send {
-    fn decide_on_failure(&self) -> SupervisorDecision;
+    fn decide_on_failure(&self, cause: &CrashCause, crash_lifecycle_stage: &CrashLifecycleStage) -> SupervisorDecision;
 }
 
 struct StoppingSupervisionStrategy {}
 impl SupervisionStrategy for StoppingSupervisionStrategy {
-    fn decide_on_failure(&self) -> SupervisorDecision {
+    fn decide_on_failure(&self, _cause: &CrashCause, crash_lifecycle_stage: &CrashLifecycleStage) -> SupervisorDecision {
         SupervisorDecision::Stop
     }
 }
 struct RestartingSupervisionStrategy {}
 impl SupervisionStrategy for RestartingSupervisionStrategy {
-    fn decide_on_failure(&self) -> SupervisorDecision {
+    fn decide_on_failure(&self, _cause: &CrashCause, crash_lifecycle_stage: &CrashLifecycleStage) -> SupervisorDecision {
         SupervisorDecision::Restart
     }
 }
@@ -275,7 +300,7 @@ pub enum Signal {
     Terminate,
     Restart,
 
-    SupervisionRequired(GenericActorRef),
+    SupervisionRequired(GenericActorRef, CrashCause, CrashLifecycleStage),
 }
 impl <M> Into<Envelope<M>> for Signal {
     fn into(self) -> Envelope<M> {
@@ -412,7 +437,6 @@ mod test {
 //TODO
 // "no external ActorRefs"
 // ActorRef -> Future
-// supervision
 // stop() method on context to stop child actors
 // shutdown
 // support for Span across message sends (?)
