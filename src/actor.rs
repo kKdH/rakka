@@ -152,36 +152,38 @@ impl <M: Send + Debug + 'static, S: SupervisionStrategy> ActorCell<M, S> {
                 break;
             }
 
-            //TODO handle panic!()
-
-            let received = catch_unwind(AssertUnwindSafe(|| self.behavior.receive(&mut self.ctx, envelope)));
-            let cause = match received {
-                Err(e) => {
-                    // panicked -> actor crashed
-                    debug!("actor crashed by panicking");
-                    CrashCause::Panic(e)
-                }
-                Ok(Err(e)) => {
-                    // returned Err -> actor crashed
-                    debug!("actor crashed returning an error: {}", e);
-                    CrashCause::Err(e)
-                }
-                Ok(_) => {
-                    continue;
-                }
-            };
-
-            // this actor crashed - suspend it and ask supervisor
-            self.ctx.myself.signal(Signal::Suspend);
-
-            if let Some(supervisor) = &self.ctx.parent {
-                supervisor.signal(Signal::SupervisionRequired(self.ctx.myself.as_generic(), cause, CrashLifecycleStage::ReceiveLoop));
-            }
-            else {
-                todo!()
-            }
+            Self::do_with_supervision(&mut self.ctx, CrashLifecycleStage::Receive, |ctx| self.behavior.receive(ctx, envelope));
         }
         trace!("exiting message loop");
+    }
+
+    fn do_with_supervision(self_ctx: &mut ActorContext<M>, lifecycle_stage: CrashLifecycleStage, f: impl FnOnce(&mut ActorContext<M>) -> anyhow::Result<()>) {
+        let received = catch_unwind(AssertUnwindSafe(|| f(self_ctx)));
+        let cause = match received {
+            Err(e) => {
+                // panicked -> actor crashed
+                debug!("actor crashed by panicking in {:?}", lifecycle_stage);
+                CrashCause::Panic(e)
+            }
+            Ok(Err(e)) => {
+                // returned Err -> actor crashed
+                debug!("actor crashed returning an error in {:?}: {}", lifecycle_stage, e);
+                CrashCause::Err(e)
+            }
+            Ok(_) => {
+                return;
+            }
+        };
+
+        // this actor crashed - suspend it and ask supervisor
+        self_ctx.myself.signal(Signal::Suspend);
+
+        if let Some(supervisor) = &self_ctx.parent {
+            supervisor.signal(Signal::SupervisionRequired(self_ctx.myself.as_generic(), cause, lifecycle_stage));
+        }
+        else {
+            todo!()
+        }
     }
 
     fn handle_child_terminated(&mut self, child_ref: &GenericActorRef) {
@@ -262,7 +264,7 @@ enum CrashCause {
 
 #[derive(Debug)]
 enum CrashLifecycleStage {
-    ReceiveLoop,
+    Receive,
 }
 
 enum SupervisorDecision {
