@@ -1,6 +1,6 @@
 use std::future::poll_fn;
 use std::task::{Context, Poll};
-use crate::actor::{Envelope, Signal};
+use crate::messages::{Envelope, Signal};
 
 const SYSTEM_CHANNEL_BUF_SIZE: usize = 16; //TODO verify / pick value
 
