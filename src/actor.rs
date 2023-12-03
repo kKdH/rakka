@@ -1,6 +1,8 @@
 use std::fmt::Debug;
 use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+use tokio::sync::Notify;
 use tracing::trace;
 
 use triomphe::Arc;
@@ -53,25 +55,43 @@ pub(crate) fn spawn_actor<M: 'static + Debug + Send>(actor_runtime: &Arc<ActorRu
 
 struct ActorSystem {
     inner: Arc<ActorRuntime>,
+    is_shutting_down: AtomicBool, //TODO state machine, coordinated shutdown
+    shut_down_completed: Arc<Notify>,
 }
 impl ActorSystem {
-    fn new() -> (ActorSystem, impl Future<Output = ()> ) {
+    fn new() -> ActorSystem {
+        //TODO register CTRL_C signal handler - offer 'await'? always / configurable SIGINT handling? separate await'ing function?
+
         let tokio_handle = tokio::runtime::Handle::try_current()
             .expect("An ActorSystem can only be created from the context of a Tokio runtime");
+
+        let shut_down_notifier = Arc::new(Notify::new());
 
         let actor_system = ActorSystem {
             inner: Arc::new(ActorRuntime {
                 tokio_handle
-            })
+            }),
+            is_shutting_down: AtomicBool::new(false),
+            shut_down_completed: shut_down_notifier.clone(),
         };
-        (
-            actor_system,
-            tokio::time::sleep(Duration::from_secs(1)) //TODO lifecycle, shutdown
-        )
+
+        actor_system
     }
 
     fn spawn<M: 'static + Debug + Send>(&mut self, behavior: impl ActorBehavior<M> + 'static + Send + Clone) -> ActorRef<M> { //TODO single top-level actor?
         spawn_actor(&self.inner, behavior, None) //TODO synthetic root actor per ActorSystem
+    }
+
+    fn shutdown(&self) {
+        let was_shutting_down = self.is_shutting_down.swap(true, Ordering::AcqRel);
+        if !was_shutting_down {
+            //TODO coordinated shutdown
+            self.shut_down_completed.notify_waiters();
+        }
+    }
+
+    async fn wait_for_shutdown(&self) {
+        self.shut_down_completed.notified().await
     }
 }
 
@@ -107,7 +127,7 @@ mod test {
 
         fn dw_behavior(_ctx: &mut ActorContext<()>, _msg: ()) {}
 
-        let (mut actor_system, shutdown_handle) = ActorSystem::new();
+        let mut actor_system = ActorSystem::new();
         let actor_ref = actor_system.spawn(dumping_behavior);
 
         let dw_ref = actor_system.spawn(dw_behavior);
@@ -118,7 +138,10 @@ mod test {
         actor_ref.stop();
         actor_ref.send("yo3".to_string());
 
-        shutdown_handle.await
+        tokio::time::sleep(Duration::from_secs(1)).await; //TODO
+        actor_system.shutdown();
+
+        // actor_system.wait_for_shutdown().await;
     }
 }
 

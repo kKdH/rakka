@@ -112,3 +112,4 @@ pub(crate) struct ActorRefInner<M> {
     pub(crate) message_sender: tokio::sync::mpsc::Sender<Envelope<M>>,
     pub(crate) system_sender: tokio::sync::mpsc::Sender<Signal>,
 }
+

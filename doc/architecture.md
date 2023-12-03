@@ -37,4 +37,4 @@ supervision
 
 lifecycle hooks
 
-message, signal
+message, signal, envelope
