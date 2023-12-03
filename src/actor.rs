@@ -6,7 +6,7 @@ use tracing::trace;
 use triomphe::Arc;
 
 use crate::behavior::ActorBehavior;
-use crate::cell::ActorCell;
+use crate::cell::Actor;
 use crate::context::ActorContext;
 use crate::mailbox::Mailbox;
 use crate::refs::{ActorId, ActorRef, ActorRefInner, GenericActorRef, SignalSender};
@@ -16,7 +16,7 @@ use crate::supervision::StoppingSupervisionStrategy;
 pub struct ActorRuntime {
     tokio_handle: tokio::runtime::Handle,
 }
-pub(crate) fn spawn_actor<M: 'static + Debug + Send>(actor_runtime: &Arc<ActorRuntime>, behavior: impl ActorBehavior<M> + 'static + Send, parent: Option<GenericActorRef>) -> ActorRef<M> {
+pub(crate) fn spawn_actor<M: 'static + Debug + Send>(actor_runtime: &Arc<ActorRuntime>, behavior: impl ActorBehavior<M> + 'static + Send + Clone, parent: Option<GenericActorRef>) -> ActorRef<M> {
     let id = ActorId::new();
     trace!("spawning new actor {:?}", id); //TODO Debug for Behavior -> impl Into<Behavior<M>>
     let (message_sender, system_sender, mailbox) = Mailbox::new(128); //TODO mailbox size
@@ -27,7 +27,9 @@ pub(crate) fn spawn_actor<M: 'static + Debug + Send>(actor_runtime: &Arc<ActorRu
         system_sender,
     }));
 
-    let actor_cell = ActorCell {
+    let initial_behavior = Box::new(behavior.clone());
+
+    let actor_cell = Actor {
         mailbox,
         ctx: ActorContext {
             myself: actor_ref.clone(),
@@ -38,6 +40,7 @@ pub(crate) fn spawn_actor<M: 'static + Debug + Send>(actor_runtime: &Arc<ActorRu
         },
         is_terminating: false,
         suspend_count: 0,
+        initial_behavior: Box::new(move || initial_behavior.clone()),
         behavior: Box::new(behavior),
         supervision_strategy: StoppingSupervisionStrategy{},
     };
@@ -67,7 +70,7 @@ impl ActorSystem {
         )
     }
 
-    fn spawn<M: 'static + Debug + Send>(&mut self, behavior: impl ActorBehavior<M> + 'static + Send) -> ActorRef<M> { //TODO single top-level actor?
+    fn spawn<M: 'static + Debug + Send>(&mut self, behavior: impl ActorBehavior<M> + 'static + Send + Clone) -> ActorRef<M> { //TODO single top-level actor?
         spawn_actor(&self.inner, behavior, None) //TODO synthetic root actor per ActorSystem
     }
 }

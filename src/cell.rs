@@ -10,16 +10,17 @@ use crate::mailbox::Mailbox;
 use crate::refs::{GenericActorRef, SignalSender};
 use crate::supervision::{CrashCause, CrashLifecycleStage, SupervisionStrategy, SupervisorDecision};
 
-pub struct ActorCell<M: Send + 'static, S: SupervisionStrategy> {
+pub struct Actor<M: Send + 'static, S: SupervisionStrategy> {
     pub(crate) ctx: ActorContext<M>,
     pub(crate) mailbox: Mailbox<M>,
     pub(crate) is_terminating: bool,
     pub(crate) suspend_count: u32,
 
+    pub(crate) initial_behavior: Box<dyn Fn() -> Box<dyn ActorBehavior<M> + Send> + Send>,
     pub(crate) behavior: Box<dyn ActorBehavior<M> + Send>,
     pub(crate) supervision_strategy: S,
 }
-impl <M: Send + Debug + 'static, S: SupervisionStrategy> ActorCell<M, S> {
+impl <M: Send + Debug + 'static, S: SupervisionStrategy> Actor<M, S> {
     #[instrument]
     pub async fn message_loop(mut self) {
         trace!("starting message loop");
@@ -158,7 +159,7 @@ impl <M: Send + Debug + 'static, S: SupervisionStrategy> ActorCell<M, S> {
         }
     }
 }
-impl <M: Send + 'static, S: SupervisionStrategy> Debug for ActorCell<M, S> {
+impl <M: Send + 'static, S: SupervisionStrategy> Debug for Actor<M, S> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "ActorCell({})", self.ctx.myself.id())
     }
