@@ -1,5 +1,4 @@
 use std::fmt::Debug;
-use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::Notify;
@@ -53,13 +52,13 @@ pub(crate) fn spawn_actor<M: 'static + Debug + Send>(actor_runtime: &Arc<ActorRu
 }
 
 
-struct ActorSystem {
+pub struct ActorSystem {
     inner: Arc<ActorRuntime>,
     is_shutting_down: AtomicBool, //TODO state machine, coordinated shutdown
     shut_down_completed: Arc<Notify>,
 }
 impl ActorSystem {
-    fn new() -> ActorSystem {
+    pub fn new() -> ActorSystem {
         //TODO register CTRL_C signal handler - offer 'await'? always / configurable SIGINT handling? separate await'ing function?
 
         let tokio_handle = tokio::runtime::Handle::try_current()
@@ -78,11 +77,11 @@ impl ActorSystem {
         actor_system
     }
 
-    fn spawn<M: 'static + Debug + Send>(&mut self, behavior: impl ActorBehavior<M> + 'static + Send + Clone) -> ActorRef<M> { //TODO single top-level actor?
+    pub fn spawn<M: 'static + Debug + Send>(&mut self, behavior: impl ActorBehavior<M> + 'static + Send + Clone) -> ActorRef<M> { //TODO single top-level actor?
         spawn_actor(&self.inner, behavior, None) //TODO synthetic root actor per ActorSystem
     }
 
-    fn shutdown(&self) {
+    pub fn shutdown(&self) {
         let was_shutting_down = self.is_shutting_down.swap(true, Ordering::AcqRel);
         if !was_shutting_down {
             //TODO coordinated shutdown
@@ -90,7 +89,7 @@ impl ActorSystem {
         }
     }
 
-    async fn wait_for_shutdown(&self) {
+    pub async fn wait_for_shutdown(&self) {
         self.shut_down_completed.notified().await
     }
 }
@@ -131,7 +130,7 @@ mod test {
         let actor_ref = actor_system.spawn(dumping_behavior);
 
         let dw_ref = actor_system.spawn(dw_behavior);
-        actor_ref.signal(Signal::RegisterDeathWatcher { subscriber: dw_ref.as_generic() });
+        actor_ref.send_signal(Signal::RegisterDeathWatcher { subscriber: dw_ref.as_generic() });
 
         actor_ref.send("yo1".to_string());
         actor_ref.send("yo2".to_string());

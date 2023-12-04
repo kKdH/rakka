@@ -47,12 +47,12 @@ impl <M: Send + 'static> SignalSender for ActorRef<M> {
         self.0.id
     }
 
-    fn signal(&self, signal: Signal) -> bool {
+    fn send_signal(&self, signal: Signal) -> bool {
         self.send_envelope(Envelope::Signal(signal))
     }
 
     fn stop(&self) -> bool {
-        self.signal(Signal::Terminate)
+        self.send_signal(Signal::Terminate)
     }
 
     fn clone_to_box(&self) -> Box<dyn SignalSender> {
@@ -73,7 +73,7 @@ impl <M: Send + 'static> Debug for ActorRef<M> {
 pub trait SignalSender: Debug + Send {
     fn id(&self) -> ActorId;
 
-    fn signal(&self, signal: Signal) -> bool;
+    fn send_signal(&self, signal: Signal) -> bool;
     fn stop(&self) -> bool;
 
     fn clone_to_box(&self) -> Box<dyn SignalSender>; //TODO move to separate trait to reduce visibility
@@ -83,7 +83,7 @@ pub trait SignalSender: Debug + Send {
 pub struct GenericActorRef(Box<dyn SignalSender>);
 impl GenericActorRef {
     pub fn signal(&self, signal: Signal) -> bool {
-        self.0.signal(signal)
+        self.0.send_signal(signal)
     }
     pub fn stop(&self) -> bool {
         self.0.stop()

@@ -85,7 +85,7 @@ impl <M: Send + Debug + 'static, S: SupervisionStrategy> Actor<M, S> {
         };
 
         // this actor crashed - suspend it and ask supervisor
-        self_ctx.myself.signal(Signal::Suspend);
+        self_ctx.myself.send_signal(Signal::Suspend);
 
         if let Some(supervisor) = &self_ctx.parent {
             supervisor.signal(Signal::SupervisionRequired(self_ctx.myself.as_generic(), cause, lifecycle_stage));
