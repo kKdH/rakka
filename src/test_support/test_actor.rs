@@ -1,25 +1,70 @@
 use std::fmt::{Debug, Formatter};
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use std::time::Duration;
+use tokio::sync::mpsc::{channel, Receiver, UnboundedReceiver, UnboundedSender};
+use tokio::time::timeout;
+use tracing::trace;
+use triomphe::Arc;
 use crate::actor::ActorSystem;
 use crate::behavior::ActorBehavior;
 use crate::context::ActorContext;
-use crate::messages::Envelope;
-use crate::refs::ActorRef;
+use crate::messages::{Envelope, Signal};
+use crate::refs::{ActorId, ActorRef, ActorRefInner};
 
 
 pub struct TestKit<M: Send + 'static + Debug> {
     inner_actor_ref: ActorRef<TestBehaviorMessages<M>>,
     recv: UnboundedReceiver<M>,
+    test_actor: ActorRef<M>,
+    msg_recv: Receiver<Envelope<M>>,
+    signal_recv: Receiver<Signal>,
 }
 impl <M: Send + 'static + Debug> TestKit<M> {
     pub fn new(actor_system: &ActorSystem) -> TestKit<M> {
+        trace!("new");
+
         let (behavior, recv) = TestBehavior::new();
+        trace!("aa");
         let inner_actor_ref = actor_system.spawn(behavior);
+
+        trace!("aaa");
+
+        let (msg_sender, msg_recv) = channel(1_000); //TODO size
+        let (signal_sender, signal_recv) = channel(1_000);
+
+        let test_actor_ref_inner = ActorRefInner {
+            id: ActorId::new(),
+            message_sender: msg_sender,
+            system_sender: signal_sender,
+        };
+
+        let test_actor_ref = ActorRef(Arc::new(test_actor_ref_inner));
 
         TestKit {
             inner_actor_ref,
             recv,
+            test_actor: test_actor_ref,
+            msg_recv,
+            signal_recv,
         }
+    }
+
+    pub fn test_actor(&self) -> ActorRef<M> {
+        self.test_actor.clone()
+    }
+
+    pub async fn expect_any_message(&mut self) {
+        self.expect_any_message_within(Duration::from_secs(5)) //TODO DEFAULT_TIMEOUT
+            .await
+    }
+    pub async fn expect_any_message_within(&mut self, timeout_duration: Duration) {
+        let future = self.msg_recv
+            .recv();
+        let with_timeout = timeout(timeout_duration, future)
+            .await;
+
+        with_timeout
+            .expect("no message within the specified timeout period")
+            .expect("channel closed - this means the actor system was closed, or something else went fundamentally wrong");
     }
 }
 
@@ -48,11 +93,13 @@ trait IgnoreFilterClone<M: Send + 'static + Debug> {
 }
 impl <M: Send + 'static + Debug, I: IgnoreFilter<M> + Clone> IgnoreFilterClone<M> for I {
     fn clone_box(&self) -> Box<dyn IgnoreFilter<M>> {
+        trace!("!!! clone_box");
         Box::new(self.clone())
     }
 }
 impl <M: Send + 'static + Debug> Clone for Box<dyn IgnoreFilter<M>> {
     fn clone(&self) -> Self {
+        trace!("--> Box.clone()");
         self.clone_box()
     }
 }
@@ -75,7 +122,6 @@ impl <M: Send + 'static + Debug> Clone for Box<dyn Autopilot<M>> {
 }
 
 
-
 /// This is generic actor behavior to support test automation. It sports the following features:
 ///
 /// * make received messages available in a channel so test code can assert on them
@@ -86,10 +132,17 @@ impl <M: Send + 'static + Debug> Clone for Box<dyn Autopilot<M>> {
 pub(super) struct TestBehavior<M: Send + 'static + Debug> {
     ignore_filter: Box<dyn IgnoreFilter<M>>,
     autopilot: Box<dyn Autopilot<M>>,
-    queue: UnboundedSender<M>,
+    queue: Arc<UnboundedSender<M>>,
 }
 impl  <M: Send + 'static + Debug> Clone for TestBehavior<M> {
     fn clone(&self) -> Self {
+        trace!("cloning test behavior");
+        self.ignore_filter.clone();
+        // self.autopilot.clone();
+        self.queue.clone();
+
+        trace!("done cloning test behavior");
+
         TestBehavior {
             ignore_filter: self.ignore_filter.clone(),
             autopilot: self.autopilot.clone(),
@@ -105,7 +158,7 @@ impl <M: Send + 'static + Debug> TestBehavior<M> {
             TestBehavior {
                 ignore_filter: Box::new(|_| false), //TODO extract to Self::no_filter()?
                 autopilot: Box::new(|_,_| {}),
-                queue: sender,
+                queue: Arc::new(sender),
             },
             receiver
         )

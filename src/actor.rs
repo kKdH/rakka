@@ -22,13 +22,23 @@ pub(crate) fn spawn_actor<M: 'static + Debug + Send>(actor_runtime: &Arc<ActorRu
     trace!("spawning new actor {:?}", id); //TODO Debug for Behavior -> impl Into<Behavior<M>>
     let (message_sender, system_sender, mailbox) = Mailbox::new(128); //TODO mailbox size
 
+
+
     let actor_ref = ActorRef(Arc::new(ActorRefInner {
         id,
         message_sender,
         system_sender,
     }));
 
+    trace!("jjj");
+
+    let cloned_behavior = behavior.clone();
+
+    trace!("jj2");
+
     let initial_behavior = Box::new(behavior.clone());
+
+    trace!("kkk");
 
     let actor_cell = Actor {
         mailbox,
@@ -45,6 +55,8 @@ pub(crate) fn spawn_actor<M: 'static + Debug + Send>(actor_runtime: &Arc<ActorRu
         behavior: Box::new(behavior),
         supervision_strategy: StoppingSupervisionStrategy{},
     };
+
+    trace!("lll");
 
     actor_runtime.tokio_handle.spawn(actor_cell.message_loop());
 
@@ -94,11 +106,14 @@ impl ActorSystem {
     }
 }
 
+//TODO unit test: actor sending messages to itself until a 'stop doing this' message is sent to it from outside -> stack overflow?
+
 #[cfg(test)]
 mod test {
     use tracing::{info, Level};
     use tracing_subscriber::FmtSubscriber;
     use crate::messages::Signal;
+    use crate::test_support::test_actor::TestKit;
 
     use super::*;
 
@@ -117,8 +132,35 @@ mod test {
         ;
     }
 
-
     #[tokio::test]
+    async fn test_asdf() {
+
+        #[derive(Debug)]
+        struct EchoMessage {
+            msg: &'static str,
+            sender: ActorRef<EchoMessage>,
+        }
+        fn echo_behavior(ctx: &mut ActorContext<EchoMessage>, m: EchoMessage) {
+            m.sender.send(EchoMessage {
+                msg: m.msg,
+                sender: ctx.myself(),
+            });
+        }
+
+        let actor_system = ActorSystem::new();
+        // let echo = actor_system.spawn(echo_behavior);
+
+        let mut test_kit = TestKit::<EchoMessage>::new(&actor_system);
+
+        // echo.send(EchoMessage {
+        //     msg: "hi",
+        //     sender: test_kit.test_actor(),
+        // });
+
+        // test_kit.expect_any_message().await;
+    }
+
+    // #[tokio::test]
     async fn test_simple() {
         fn dumping_behavior(_ctx: &mut ActorContext<String>, s: String) {
             info!("{}", s);
