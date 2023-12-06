@@ -77,7 +77,7 @@ impl ActorSystem {
         actor_system
     }
 
-    pub fn spawn<M: 'static + Debug + Send>(&mut self, behavior: impl ActorBehavior<M> + 'static + Send + Clone) -> ActorRef<M> { //TODO single top-level actor?
+    pub fn spawn<M: 'static + Debug + Send>(&self, behavior: impl ActorBehavior<M> + 'static + Send + Clone) -> ActorRef<M> { //TODO single top-level actor?
         spawn_actor(&self.inner, behavior, None) //TODO synthetic root actor per ActorSystem
     }
 
@@ -126,7 +126,7 @@ mod test {
 
         fn dw_behavior(_ctx: &mut ActorContext<()>, _msg: ()) {}
 
-        let mut actor_system = ActorSystem::new();
+        let actor_system = ActorSystem::new();
         let actor_ref = actor_system.spawn(dumping_behavior);
 
         let dw_ref = actor_system.spawn(dw_behavior);
