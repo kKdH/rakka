@@ -22,23 +22,13 @@ pub(crate) fn spawn_actor<M: 'static + Debug + Send>(actor_runtime: &Arc<ActorRu
     trace!("spawning new actor {:?}", id); //TODO Debug for Behavior -> impl Into<Behavior<M>>
     let (message_sender, system_sender, mailbox) = Mailbox::new(128); //TODO mailbox size
 
-
-
     let actor_ref = ActorRef(Arc::new(ActorRefInner {
         id,
         message_sender,
         system_sender,
     }));
 
-    trace!("jjj");
-
-    let cloned_behavior = behavior.clone();
-
-    trace!("jj2");
-
     let initial_behavior = Box::new(behavior.clone());
-
-    trace!("kkk");
 
     let actor_cell = Actor {
         mailbox,
@@ -55,8 +45,6 @@ pub(crate) fn spawn_actor<M: 'static + Debug + Send>(actor_runtime: &Arc<ActorRu
         behavior: Box::new(behavior),
         supervision_strategy: StoppingSupervisionStrategy{},
     };
-
-    trace!("lll");
 
     actor_runtime.tokio_handle.spawn(actor_cell.message_loop());
 
@@ -148,16 +136,16 @@ mod test {
         }
 
         let actor_system = ActorSystem::new();
-        // let echo = actor_system.spawn(echo_behavior);
+        let echo = actor_system.spawn(echo_behavior);
 
         let mut test_kit = TestKit::<EchoMessage>::new(&actor_system);
 
-        // echo.send(EchoMessage {
-        //     msg: "hi",
-        //     sender: test_kit.test_actor(),
-        // });
-
-        // test_kit.expect_any_message().await;
+        echo.send(EchoMessage {
+            msg: "hi",
+            sender: test_kit.test_actor(),
+        });
+        //
+        test_kit.expect_any_message().await;
     }
 
     // #[tokio::test]

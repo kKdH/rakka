@@ -1,15 +1,15 @@
 use std::fmt::{Debug, Formatter};
 use std::time::Duration;
+
 use tokio::sync::mpsc::{channel, Receiver, UnboundedReceiver, UnboundedSender};
 use tokio::time::timeout;
-use tracing::trace;
 use triomphe::Arc;
+
 use crate::actor::ActorSystem;
 use crate::behavior::ActorBehavior;
 use crate::context::ActorContext;
 use crate::messages::{Envelope, Signal};
 use crate::refs::{ActorId, ActorRef, ActorRefInner};
-
 
 pub struct TestKit<M: Send + 'static + Debug> {
     inner_actor_ref: ActorRef<TestBehaviorMessages<M>>,
@@ -20,15 +20,10 @@ pub struct TestKit<M: Send + 'static + Debug> {
 }
 impl <M: Send + 'static + Debug> TestKit<M> {
     pub fn new(actor_system: &ActorSystem) -> TestKit<M> {
-        trace!("new");
-
         let (behavior, recv) = TestBehavior::new();
-        trace!("aa");
         let inner_actor_ref = actor_system.spawn(behavior);
 
-        trace!("aaa");
-
-        let (msg_sender, msg_recv) = channel(1_000); //TODO size
+        let (msg_sender, msg_recv) = channel(1_000_000_000); //TODO size
         let (signal_sender, signal_recv) = channel(1_000);
 
         let test_actor_ref_inner = ActorRefInner {
@@ -85,29 +80,37 @@ impl <M: Send + 'static + Debug> Debug for TestBehaviorMessages<M> {
 }
 
 
-pub trait IgnoreFilter<M: Send + 'static + Debug> : Fn(&M) -> bool + Send + 'static {}
-impl <M: Send + 'static + Debug, F: Fn(&M) -> bool + Send + 'static + Clone> IgnoreFilter<M> for F {}
-
-trait IgnoreFilterClone<M: Send + 'static + Debug> {
+pub trait IgnoreFilter<M: Send + 'static + Debug> : Send + 'static + IgnoreFilterClone<M> {
+    fn apply(&self, msg: &M) -> bool;
+}
+impl <M: Send + 'static + Debug, F: Fn(&M) -> bool + Send + 'static + Clone> IgnoreFilter<M> for F {
+    fn apply(&self, msg: &M) -> bool {
+        self(msg)
+    }
+}
+pub trait IgnoreFilterClone<M: Send + 'static + Debug> {
     fn clone_box(&self) -> Box<dyn IgnoreFilter<M>>;
 }
 impl <M: Send + 'static + Debug, I: IgnoreFilter<M> + Clone> IgnoreFilterClone<M> for I {
     fn clone_box(&self) -> Box<dyn IgnoreFilter<M>> {
-        trace!("!!! clone_box");
         Box::new(self.clone())
     }
 }
 impl <M: Send + 'static + Debug> Clone for Box<dyn IgnoreFilter<M>> {
     fn clone(&self) -> Self {
-        trace!("--> Box.clone()");
         self.clone_box()
     }
 }
 
-pub trait Autopilot<M: Send + 'static + Debug> : Fn(&mut ActorContext<TestBehaviorMessages<M>>, &M) + Send + 'static {}
-impl <M: Send + 'static + Debug, F: Fn(&mut ActorContext<TestBehaviorMessages<M>>, &M) + Send + 'static + Clone> Autopilot<M> for F {}
-
-trait AutopilotClone<M: Send + 'static + Debug> {
+pub trait Autopilot<M: Send + 'static + Debug> : Send + 'static + AutopilotClone<M> {
+    fn apply(&self, ctx: &mut ActorContext<TestBehaviorMessages<M>>, msg: &M);
+}
+impl <M: Send + 'static + Debug, F: Fn(&mut ActorContext<TestBehaviorMessages<M>>, &M) + Send + 'static + Clone> Autopilot<M> for F {
+    fn apply(&self, ctx: &mut ActorContext<TestBehaviorMessages<M>>, msg: &M) {
+        self(ctx, msg)
+    }
+}
+pub trait AutopilotClone<M: Send + 'static + Debug> {
     fn clone_box(&self) -> Box<dyn Autopilot<M>>;
 }
 impl <M: Send + 'static + Debug, I: Autopilot<M> + Clone> AutopilotClone<M> for I {
@@ -136,13 +139,6 @@ pub(super) struct TestBehavior<M: Send + 'static + Debug> {
 }
 impl  <M: Send + 'static + Debug> Clone for TestBehavior<M> {
     fn clone(&self) -> Self {
-        trace!("cloning test behavior");
-        self.ignore_filter.clone();
-        // self.autopilot.clone();
-        self.queue.clone();
-
-        trace!("done cloning test behavior");
-
         TestBehavior {
             ignore_filter: self.ignore_filter.clone(),
             autopilot: self.autopilot.clone(),
@@ -156,8 +152,8 @@ impl <M: Send + 'static + Debug> TestBehavior<M> {
 
         (
             TestBehavior {
-                ignore_filter: Box::new(|_| false), //TODO extract to Self::no_filter()?
-                autopilot: Box::new(|_,_| {}),
+                ignore_filter: Box::new(|_msg: &M| false), //TODO extract to Self::no_filter()?
+                autopilot: Box::new(|_ctx: &mut ActorContext<TestBehaviorMessages<M>>, _msg: &M| {}),
                 queue: Arc::new(sender),
             },
             receiver
@@ -174,8 +170,8 @@ impl <M: Send + 'static + Debug> ActorBehavior<TestBehaviorMessages<M>> for Test
                 self.autopilot = autopilot;
             }
             Envelope::Message(TestBehaviorMessages::RegularMessage(msg)) => {
-                if !self.ignore_filter.as_ref()(&msg) {
-                    self.autopilot.as_ref()(ctx, &msg);
+                if !self.ignore_filter.apply(&msg) {
+                    self.autopilot.apply(ctx, &msg);
 
                     if let Err(e) = self.queue.send(msg) {
                         //TODO receiver was closed
