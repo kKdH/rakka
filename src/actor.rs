@@ -121,7 +121,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_asdf() {
+    async fn test_simple_echo() {
 
         #[derive(Debug, Eq, PartialEq)]
         struct EchoMessage {
