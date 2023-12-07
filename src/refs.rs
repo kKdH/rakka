@@ -72,6 +72,17 @@ impl <M: Send + 'static> Debug for ActorRef<M> {
         write!(f, "ActorRef({})", self.0.id.0)
     }
 }
+impl <M: Send + 'static> Eq for ActorRef<M> {}
+impl <M: Send + 'static> PartialEq for ActorRef<M> {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.id == other.0.id
+    }
+}
+impl <M: Send + 'static> Hash for ActorRef<M> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.id.hash(state);
+    }
+}
 
 pub trait SignalSender: Debug + Send {
     fn id(&self) -> ActorId;

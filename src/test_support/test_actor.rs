@@ -47,11 +47,11 @@ impl <M: Send + 'static + Debug> TestKit<M> {
         self.test_actor.clone()
     }
 
-    pub async fn expect_any_message(&mut self) {
+    pub async fn expect_any_message(&mut self) -> M {
         self.expect_any_message_within(Duration::from_secs(5)) //TODO DEFAULT_TIMEOUT
             .await
     }
-    pub async fn expect_any_message_within(&mut self, timeout_duration: Duration) {
+    pub async fn expect_any_message_within(&mut self, timeout_duration: Duration) -> M {
         let future = self.msg_recv
             .recv();
         let with_timeout = timeout(timeout_duration, future)
@@ -59,7 +59,7 @@ impl <M: Send + 'static + Debug> TestKit<M> {
 
         with_timeout
             .expect("no message within the specified timeout period")
-            .expect("channel closed - this means the actor system was closed, or something else went fundamentally wrong");
+            .expect("channel closed - this means the actor system was closed, or something else went fundamentally wrong")
     }
 }
 

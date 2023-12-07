@@ -123,7 +123,7 @@ mod test {
     #[tokio::test]
     async fn test_asdf() {
 
-        #[derive(Debug)]
+        #[derive(Debug, Eq, PartialEq)]
         struct EchoMessage {
             msg: &'static str,
             sender: ActorRef<EchoMessage>,
@@ -144,8 +144,9 @@ mod test {
             msg: "hi",
             sender: test_kit.test_actor(),
         });
-        //
-        test_kit.expect_any_message().await;
+
+        let response = test_kit.expect_any_message().await;
+        assert_eq!(response, EchoMessage { msg: "hi", sender: echo });
     }
 
     // #[tokio::test]
