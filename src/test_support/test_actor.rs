@@ -15,7 +15,7 @@ pub struct TestKit<M: Send + 'static + Debug> {
     inner_actor_ref: ActorRef<TestBehaviorMessages<M>>,
     recv: UnboundedReceiver<M>,
     test_actor: ActorRef<M>,
-    msg_recv: Receiver<Envelope<M>>,
+    msg_recv: Receiver<M>,
     signal_recv: Receiver<Signal>,
 }
 impl <M: Send + 'static + Debug> TestKit<M> {

@@ -27,11 +27,14 @@ impl Display for ActorId {
 pub struct ActorRef<M: Send + 'static>(pub(crate) Arc<ActorRefInner<M>>);
 impl <M: Send + 'static> ActorRef<M> {
     pub fn send(&self, msg: M) -> bool {
-        self.send_envelope(Envelope::Message(msg))
+        self.0.message_sender.try_send(msg).is_ok()
     }
 
     pub fn send_envelope(&self, envelope: Envelope<M>) -> bool {
-        self.0.message_sender.try_send(envelope).is_ok()
+        match envelope {
+            Envelope::Message(m) => self.send(m),
+            Envelope::Signal(s) => self.send_signal(s),
+        }
     }
 
     pub fn as_generic(&self) -> GenericActorRef {
@@ -48,7 +51,7 @@ impl <M: Send + 'static> SignalSender for ActorRef<M> {
     }
 
     fn send_signal(&self, signal: Signal) -> bool {
-        self.send_envelope(Envelope::Signal(signal))
+        self.0.system_sender.try_send(signal).is_ok()
     }
 
     fn stop(&self) -> bool {
@@ -109,7 +112,7 @@ impl Hash for GenericActorRef {
 
 pub(crate) struct ActorRefInner<M> {
     pub(crate) id: ActorId,
-    pub(crate) message_sender: tokio::sync::mpsc::Sender<Envelope<M>>,
+    pub(crate) message_sender: tokio::sync::mpsc::Sender<M>,
     pub(crate) system_sender: tokio::sync::mpsc::Sender<Signal>,
 }
 
